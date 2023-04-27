@@ -116,8 +116,17 @@ func (s *Server) HandleFrame(frameHandler FrameHandler) {
 	s.frHandler = frameHandler
 }
 
-// Upgrade upgrades websocket connections.
+// Upgrade upgrades websocket connection. The websocket connection gets user defined id.
+func (s *Server) UpgradeWithID(ctx *fasthttp.RequestCtx, id uint64) {
+	s.upgrade(ctx, &id)
+}
+
+// Upgrade upgrades websocket connections. The websocket connection gets a monotonically increasing id.
 func (s *Server) Upgrade(ctx *fasthttp.RequestCtx) {
+	s.upgrade(ctx, nil)
+}
+
+func (s *Server) upgrade(ctx *fasthttp.RequestCtx, id *uint64) {
 	if !ctx.IsGet() {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 		return
@@ -210,7 +219,11 @@ func (s *Server) Upgrade(ctx *fasthttp.RequestCtx) {
 				}
 
 				conn := acquireConn(c)
-				conn.id = atomic.AddUint64(&s.nextID, 1)
+				if id != nil {
+					conn.id = *id
+				} else {
+					conn.id = atomic.AddUint64(&s.nextID, 1)
+				}
 				// establishing default options
 				conn.ctx = nctx
 
@@ -224,8 +237,17 @@ func (s *Server) Upgrade(ctx *fasthttp.RequestCtx) {
 	}
 }
 
-// NetUpgrade upgrades the websocket connection for net/http.
+// NetUpgradeWithID upgrades the websocket connection for net/http. The websocket connection gets user defined id.
+func (s *Server) NetUpgradeWithID(resp http.ResponseWriter, req *http.Request, id uint64) {
+	s.netUpgrade(resp, req, &id)
+}
+
+// NetUpgrade upgrades the websocket connection for net/http. The websocket connection gets an monotonically increasing id.
 func (s *Server) NetUpgrade(resp http.ResponseWriter, req *http.Request) {
+	s.netUpgrade(resp, req, nil)
+}
+
+func (s *Server) netUpgrade(resp http.ResponseWriter, req *http.Request, id *uint64) {
 	if req.Method != "GET" {
 		resp.WriteHeader(http.StatusBadRequest)
 		return
@@ -333,7 +355,11 @@ func (s *Server) NetUpgrade(resp http.ResponseWriter, req *http.Request) {
 
 			go func(ctx context.Context) {
 				conn := acquireConn(c)
-				conn.id = atomic.AddUint64(&s.nextID, 1)
+				if id != nil {
+					conn.id = *id
+				} else {
+					conn.id = atomic.AddUint64(&s.nextID, 1)
+				}
 				conn.ctx = ctx
 
 				if s.openHandler != nil {
