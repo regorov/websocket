@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/dgrr/websocket"
+	"github.com/regorov/websocket"
 )
 
 func OnMessage(c *websocket.Conn, isBinary bool, data []byte) {
@@ -16,7 +16,7 @@ func main() {
 	wS.HandleData(OnMessage)
 
 	s := http.Server{
-		Addr: ":8081",
+		Addr:    ":8081",
 		Handler: http.HandlerFunc(wS.NetUpgrade),
 	}
 

@@ -2,7 +2,8 @@ package main
 
 import (
 	"fmt"
-	"github.com/dgrr/websocket"
+
+	"github.com/regorov/websocket"
 	"github.com/valyala/fasthttp"
 )
 
