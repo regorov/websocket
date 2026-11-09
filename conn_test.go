@@ -66,7 +66,7 @@ func openConn(t *testing.T, ln *fasthttputil.InmemoryListener) *Client {
 	}
 
 	// TODO: UpgradeAsClient
-	fmt.Fprintf(c, "GET / HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\r\n")
 
 	br := bufio.NewReader(c)
 	var res fasthttp.Response
@@ -155,7 +155,10 @@ func TestReadFrame(t *testing.T) {
 
 	fr.Reset()
 	_, err = conn.ReadFrame(fr)
-	if !fr.IsContinuation() {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fr.IsClose() { // the server answers the close frame
 		t.Fatalf("Unexpected frame %s", fr.Code())
 	}
 

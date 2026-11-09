@@ -36,6 +36,12 @@ func ClientWithHeaders(c net.Conn, url string, req *fasthttp.Request) (*Client, 
 //
 // r can be nil.
 func UpgradeAsClient(c net.Conn, url string, r *fasthttp.Request) error {
+	return upgradeAsClient(c, bufio.NewReader(c), url, r)
+}
+
+// upgradeAsClient upgrades c reading the response with br. Frames the server
+// sends right after the response may already be buffered in br.
+func upgradeAsClient(c net.Conn, br *bufio.Reader, url string, r *fasthttp.Request) error {
 	req := fasthttp.AcquireRequest()
 	res := fasthttp.AcquireResponse()
 	uri := fasthttp.AcquireURI()
@@ -68,7 +74,6 @@ func UpgradeAsClient(c net.Conn, url string, r *fasthttp.Request) error {
 
 	req.SetRequestURIBytes(uri.FullURI())
 
-	br := bufio.NewReader(c)
 	bw := bufio.NewWriter(c)
 	req.Write(bw)
 	bw.Flush()
@@ -85,12 +90,12 @@ func UpgradeAsClient(c net.Conn, url string, r *fasthttp.Request) error {
 }
 
 func client(c net.Conn, url string, r *fasthttp.Request) (cl *Client, err error) {
-	err = UpgradeAsClient(c, url, r)
+	br := bufio.NewReader(c)
+	err = upgradeAsClient(c, br, url, r)
 	if err == nil {
 		cl = &Client{
-			c: c,
-			brw: bufio.NewReadWriter(
-				bufio.NewReader(c), bufio.NewWriter(c)),
+			c:   c,
+			brw: bufio.NewReadWriter(br, bufio.NewWriter(c)),
 		}
 	}
 

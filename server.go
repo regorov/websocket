@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/valyala/bytebufferpool"
 	"github.com/valyala/fasthttp"
@@ -198,7 +199,7 @@ func (s *Server) upgrade(ctx *fasthttp.RequestCtx, id *uint64) {
 			ctx.Response.SetStatusCode(fasthttp.StatusSwitchingProtocols)
 			ctx.Response.Header.AddBytesKV(connectionString, upgradeString)
 			ctx.Response.Header.AddBytesKV(upgradeString, websocketString)
-			ctx.Response.Header.AddBytesKV(wsHeaderAccept, makeKey(hkey, hkey))
+			ctx.Response.Header.AddBytesKV(wsHeaderAccept, makeKey(nil, hkey))
 
 			// TODO: implement bad websocket version
 			// https://tools.ietf.org/html/rfc6455#section-4.4
@@ -340,7 +341,7 @@ func (s *Server) netUpgrade(resp http.ResponseWriter, req *http.Request, id *uin
 			rs.SetStatusCode(fasthttp.StatusSwitchingProtocols)
 			rs.Header.AddBytesKV(connectionString, upgradeString)
 			rs.Header.AddBytesKV(upgradeString, websocketString)
-			rs.Header.AddBytesKV(wsHeaderAccept, makeKey(s2b(hkey), s2b(hkey)))
+			rs.Header.AddBytesKV(wsHeaderAccept, makeKey(nil, s2b(hkey)))
 			// TODO: implement bad websocket version
 			// https://tools.ietf.org/html/rfc6455#section-4.4
 			if proto := selectProtocol(hprotos, s.Protocols); proto != "" {
@@ -372,6 +373,10 @@ func (s *Server) netUpgrade(resp http.ResponseWriter, req *http.Request, id *uin
 	}
 }
 
+// closeFlushTimeout is how long a closing connection waits for its queued
+// frames to be written before the network connection is closed.
+const closeFlushTimeout = time.Second
+
 func (s *Server) serveConn(c *Conn) {
 	var closeErr error
 
@@ -399,6 +404,15 @@ loop:
 				s.errHandler(c, err)
 			}
 		case <-c.closer:
+			// handleClose queues the peer's close status before closing closer
+			select {
+			case err := <-c.errch:
+				if ce, ok := err.(Error); ok {
+					closeErr = ce
+				}
+			default:
+			}
+
 			break loop
 		}
 	}
@@ -406,6 +420,18 @@ loop:
 	if s.closeHandler != nil {
 		s.closeHandler(c, closeErr)
 	}
+
+	// stop readLoop and writeLoop and reject further writes
+	c.closeOnce.Do(func() { close(c.closer) })
+
+	// let writeLoop flush the queued frames (a close frame among them),
+	// but do not let a peer that does not read hold the connection
+	flushTimer := time.NewTimer(closeFlushTimeout)
+	select {
+	case <-c.done:
+	case <-flushTimer.C:
+	}
+	flushTimer.Stop()
 
 	c.c.Close()
 
@@ -488,25 +514,31 @@ func (s *Server) handlePong(c *Conn, data []byte) {
 }
 
 func (s *Server) handleClose(c *Conn, fr *Frame) {
-	defer close(c.closer)
-	c.errch <- func() error {
-		if fr.Status() != StatusNone {
-			return Error{
-				Status: fr.Status(),
-				Reason: string(fr.Payload()),
-			}
+	var err error
+	if fr.Status() != StatusNone {
+		err = Error{
+			Status: fr.Status(),
+			Reason: string(fr.Payload()),
 		}
+	}
 
-		return nil
-	}()
+	// handleClose runs in serveConn, the only reader of errch: never block on it
+	select {
+	case c.errch <- err:
+	default:
+	}
 
 	status := fr.Status()
 
-	fr = AcquireFrame()
-	fr.SetClose()
-	fr.SetStatus(status)
-	fr.SetFin()
+	// reply back, unless the server has already sent a close frame
+	c.closeOnce.Do(func() {
+		fr := AcquireFrame()
+		fr.SetClose()
+		fr.SetStatus(status)
+		fr.SetFin()
 
-	// reply back
-	c.WriteFrame(fr)
+		c.WriteFrame(fr)
+
+		close(c.closer)
+	})
 }

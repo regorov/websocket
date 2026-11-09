@@ -21,8 +21,14 @@ type Conn struct {
 
 	input  chan *Frame
 	output chan *Frame
-	closer chan struct{}
-	errch  chan error
+
+	closer    chan struct{}
+	closeOnce sync.Once
+
+	// done is closed when writeLoop stops.
+	done chan struct{}
+
+	errch chan error
 
 	// buffered messages
 	buffered *bytebufferpool.ByteBuffer
@@ -89,6 +95,7 @@ func (c *Conn) reset(conn net.Conn) {
 	c.input = make(chan *Frame, 128)
 	c.output = make(chan *Frame, 128)
 	c.closer = make(chan struct{}, 1)
+	c.done = make(chan struct{})
 	c.errch = make(chan error, 2)
 	c.ReadTimeout = 0
 	c.WriteTimeout = 0
@@ -123,7 +130,13 @@ func (c *Conn) readLoop() {
 
 		isClose := fr.IsClose()
 
-		c.input <- fr
+		select {
+		case c.input <- fr:
+		case <-c.closer:
+			// serveConn may have stopped reading input
+			ReleaseFrame(fr)
+			return
+		}
 
 		if isClose {
 			break
@@ -145,6 +158,7 @@ func (ce closeError) Error() string {
 
 func (c *Conn) writeLoop() {
 	defer c.wg.Done()
+	defer close(c.done)
 
 loop:
 	for {
@@ -169,14 +183,15 @@ loop:
 		}
 	}
 
-	// flush all the frames
-	for n := len(c.output); n >= 0; n-- {
-		fr, ok := <-c.output
-		if !ok {
-			break
-		}
+	// flush the frames queued before the close
+	for n := len(c.output); n > 0; n-- {
+		fr := <-c.output
+		err := c.writeFrame(fr)
+		isClose := fr.IsClose()
 
-		if err := c.writeFrame(fr); err != nil {
+		ReleaseFrame(fr)
+
+		if err != nil || isClose {
 			break
 		}
 	}
@@ -216,13 +231,37 @@ func (c *Conn) Write(data []byte) (int, error) {
 	fr.SetPayload(data)
 	fr.SetText()
 
-	c.WriteFrame(fr)
+	if err := c.send(fr); err != nil {
+		return 0, err
+	}
 
 	return n, nil
 }
 
+// WriteFrame queues fr to be written. The connection takes ownership of fr.
+//
+// Once the connection is closing or closed, fr is dropped.
 func (c *Conn) WriteFrame(fr *Frame) {
-	c.output <- fr
+	c.send(fr)
+}
+
+// send queues fr for writeLoop. It drops fr and returns ErrConnClosed
+// once the connection is closing or closed.
+func (c *Conn) send(fr *Frame) error {
+	select {
+	case <-c.closer:
+	case <-c.done:
+	default:
+		select {
+		case c.output <- fr:
+			return nil
+		case <-c.done:
+		}
+	}
+
+	ReleaseFrame(fr)
+
+	return ErrConnClosed
 }
 
 func (c *Conn) Close() error {
@@ -231,8 +270,11 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// CloseDetail sends a close frame with status and reason and closes the connection.
+//
+// It is safe to call from any goroutine; only the first close has effect.
 func (c *Conn) CloseDetail(status StatusCode, reason string) {
-	if !c.isClosed() {
+	c.closeOnce.Do(func() {
 		fr := AcquireFrame()
 		fr.SetClose()
 		fr.SetStatus(status)
@@ -243,18 +285,5 @@ func (c *Conn) CloseDetail(status StatusCode, reason string) {
 		c.WriteFrame(fr)
 
 		close(c.closer)
-	}
-
-	return
-}
-
-func (c *Conn) isClosed() bool {
-	select {
-	case <-c.closer:
-		return true
-	default:
-		// if we reach this point, that means `closer` is not closed
-		// so we still have the connection alive
-		return false
-	}
+	})
 }
