@@ -41,7 +41,9 @@ type Conn struct {
 	// WriteTimeout ...
 	WriteTimeout time.Duration
 
-	// MaxPayloadSize prevents huge memory allocation.
+	// MaxPayloadSize prevents huge memory allocation. It limits the size
+	// of a frame and of a message assembled from fragments; a bigger message
+	// closes the connection with StatusTooBig. Zero means no limit.
 	//
 	// By default MaxPayloadSize is DefaultPayloadSize.
 	MaxPayloadSize uint64

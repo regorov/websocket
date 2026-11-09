@@ -468,6 +468,17 @@ func (s *Server) handleFrameData(c *Conn, fr *Frame) {
 			bf.Write(fr.Payload())
 		}
 	} else {
+		// MaxPayloadSize limits single frames in readLoop and whole messages here
+		if c.MaxPayloadSize > 0 && uint64(bf.Len()+len(fr.Payload())) > c.MaxPayloadSize {
+			c.buffered = nil
+			bytebufferpool.Put(bf)
+			ReleaseFrame(fr)
+
+			c.CloseDetail(StatusTooBig, "message too big")
+
+			return
+		}
+
 		bf.Write(fr.Payload())
 		if fr.IsFin() {
 			data = bf.B

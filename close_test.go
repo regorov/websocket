@@ -305,3 +305,68 @@ func TestCloseHandlerGetsClientStatus(t *testing.T) {
 		cl.c.Close()
 	}
 }
+
+func TestFragmentedMessageOverLimitIsRejected(t *testing.T) {
+	stopped := make(chan *Conn, 1)
+	got := make(chan int, 1)
+	ws := &Server{}
+	ws.HandleData(func(c *Conn, isBinary bool, data []byte) { got <- len(data) })
+	url := startNetServer(t, ws, stopped)
+
+	cl, err := Dial(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.c.Close()
+
+	// small fragmented message: delivered
+	writeFragments(cl, 3, 10)
+	if n := <-got; n != 30 {
+		t.Fatalf("got message of %d bytes, want 30", n)
+	}
+
+	// 3 fragments of 512KB: over DefaultPayloadSize, each frame under it
+	go writeFragments(cl, 3, 512<<10)
+
+	fr := AcquireFrame()
+	defer ReleaseFrame(fr)
+
+	cl.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := cl.ReadFrame(fr); err != nil {
+		t.Fatalf("no close frame: %v", err)
+	}
+	if !fr.IsClose() || fr.Status() != StatusTooBig {
+		t.Fatalf("got %s frame with status %s, want close with TooBig", fr.Code(), fr.Status())
+	}
+
+	select {
+	case n := <-got:
+		t.Fatalf("message of %d bytes delivered, want rejected", n)
+	default:
+	}
+
+	waitStopped(t, stopped, 1)
+}
+
+// writeFragments sends a text message as n masked frames of size bytes each.
+func writeFragments(cl *Client, n, size int) {
+	payload := make([]byte, size)
+	for i := 0; i < n; i++ {
+		fr := AcquireFrame()
+		if i == 0 {
+			fr.SetText()
+		} else {
+			fr.SetContinuation()
+		}
+		if i == n-1 {
+			fr.SetFin()
+		}
+		fr.SetPayload(payload)
+		fr.Mask()
+		_, err := cl.WriteFrame(fr)
+		ReleaseFrame(fr)
+		if err != nil {
+			return // the server may close the connection first
+		}
+	}
+}
